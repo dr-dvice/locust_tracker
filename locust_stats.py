@@ -5,6 +5,7 @@ import numpy as np
 import warnings
 import re
 import argparse
+import seaborn as sns
 
 warnings.filterwarnings('ignore')
 
@@ -53,6 +54,8 @@ parser.add_argument("-f", "--fps",
                     default=2)
 parser.add_argument("-h5", "--saveh5",  action="store_true",
                     help="Save updated .H5 data with calculated movement on each frame, distances, and angles.")
+parser.add_argument('-d', "--debug", action="store_true",
+                    help="Output debug messages, graphs, and calculations.")
 
 
 args = vars(parser.parse_args())
@@ -67,6 +70,7 @@ ANGLE_THRESHOLD = args["anglethresh"]
 FRAMES_PER_SECOND = args["fps"]
 EXPECTED_VIDEO_LENGTH_S = args["length"]
 SAVE_HD5 = args["saveh5"]
+DEBUG = args["debug"]
 
 os.makedirs(results_folder, exist_ok=True)  # Create the folder if it doesn't exist
 
@@ -170,6 +174,110 @@ def fill_start_NaNs(df):
         df.loc[:valid_index, ["x", "y"]] = df.loc[:valid_index, ["x", "y"]].fillna({"x": first_x, "y": first_y})
     return df
 
+def point_slope_form(x1, y1, m, x):
+  return m * (x - x1) + y1
+
+def get_gaze_direction(df):
+    """
+    Calculates whether the animal is looking at the left or right wall
+    Args:
+       df: The dataframe containing all the information on the animal's coordinates.
+
+    Returns: a dictionary with the number of seconds the animal spent looking at the stimulus wall (or not)
+    """
+    leftwall_gaze_f = 0
+    rightwall_gaze_f = 0
+    other_gaze_f = 0
+    onwalls = 0
+    dotprods = []
+    for idx, row in df.iterrows():
+        # Step 1: Save coordinates as numpy vectors
+        eye_left = np.array([row["Left-eye", "x"], row["Left-eye", "y"]])
+        eye_right = np.array([row["Right-eye", "x"], row["Right-eye", "y"]])
+        head = np.array([row["Head", "x"], row["Head", "y"]])
+        center = np.array([row["Center", "x"], row["Center", "y"]])
+
+        # Step 2: Translate gaze
+        eye_left = eye_left - center
+        eye_right = eye_right - center
+        head = head - center
+        center = center - center
+
+        # Create vectors and normalize
+        eye_vector = eye_left - eye_right
+        body_vector = head
+        gaze_vector = (eye_left - center) + (eye_right - center)
+
+        eye_vector /= np.linalg.norm(eye_vector)
+        body_vector /= np.linalg.norm(body_vector)
+        gaze_vector /= np.linalg.norm(gaze_vector)
+
+        # Step 3: Compute and normalize wall vectors (relative to arena center)
+        left_wall_vector_top = np.array([LEFT_STIMWALL_BOUNDARY_X, TOP_WALL_BOUNDARY_Y]) - center
+        left_wall_vector_bottom = np.array([LEFT_STIMWALL_BOUNDARY_X, BOTTOM_WALL_BOUNDARY_Y]) - center
+        right_wall_vector_top = np.array([RIGHT_STIMWALL_BOUNDARY_X , TOP_WALL_BOUNDARY_Y]) - center
+        right_wall_vector_bottom = np.array([RIGHT_STIMWALL_BOUNDARY_X, BOTTOM_WALL_BOUNDARY_Y]) - center
+
+        # Convert to float before normalization to avoid integer division issues
+        left_wall_vector_top = left_wall_vector_top.astype(float) / np.linalg.norm(left_wall_vector_top)
+        left_wall_vector_bottom = left_wall_vector_bottom.astype(float) / np.linalg.norm(left_wall_vector_bottom)
+        right_wall_vector_top = right_wall_vector_top.astype(float) / np.linalg.norm(right_wall_vector_top)
+        right_wall_vector_bottom = right_wall_vector_bottom.astype(float) / np.linalg.norm(right_wall_vector_bottom)
+
+        # Using same boolean as rest of the script for consistency
+        x_head = row["Head", "x"]
+        y_head = row["Head", "y"]
+        x_center = row["Center", "x"]
+        y_center = row["Center", "y"]
+
+        # Create a reusable boolean for whether the animal is inside the arena but not touching the walls
+        in_boundaries = (
+                LEFT_STIMWALL_BOUNDARY_X < x_head < RIGHT_STIMWALL_BOUNDARY_X and
+                LEFT_STIMWALL_BOUNDARY_X < x_center < RIGHT_STIMWALL_BOUNDARY_X and
+                BOTTOM_WALL_BOUNDARY_Y < y_head < TOP_WALL_BOUNDARY_Y and
+                BOTTOM_WALL_BOUNDARY_Y < y_center < TOP_WALL_BOUNDARY_Y
+        )
+
+        if in_boundaries:
+            dotprod = np.dot(eye_vector, body_vector)
+            if DEBUG:
+                angle_error =  90 - abs(round(np.degrees(np.arccos(np.clip(dotprod, -1.0, 1.0))), 2))
+                if angle_error > 15:
+                    print(f"Bad eye vs. body orientation vectors at min {int(idx/FRAMES_PER_SECOND//60)}:{int(idx/FRAMES_PER_SECOND%60)}. Angle deviation of {angle_error:.2f}°")
+            dotprods.append(dotprod)
+            if gaze_vector[0] > 0:
+                #looking right
+                if right_wall_vector_top[1] >= gaze_vector[1] >= right_wall_vector_bottom[1]:
+                    rightwall_gaze_f+=1
+                else:
+                    other_gaze_f+=1
+            elif gaze_vector[0] < 0:
+                if left_wall_vector_top[1] >= gaze_vector[1] >= left_wall_vector_bottom[1]:
+                    leftwall_gaze_f+=1
+                else:
+                    other_gaze_f+=1
+            else:
+                other_gaze_f+=1
+        else: onwalls +=1
+    on_arena_floor = FRAMES_EXPECTED - onwalls
+
+    if DEBUG:
+        plt.figure(figsize=(8, 5))
+        sns.histplot(dotprods, bins=50, kde=True)
+        plt.axvline(0, color='red', linestyle='dashed', label="Zero")
+        plt.xlabel("Value")
+        plt.ylabel("Frequency")
+        plt.title("Distribution of Near-Zero Numbers")
+        plt.legend()
+        plt.show()
+
+    return {
+        'leftwall_gaze': round(leftwall_gaze_f / on_arena_floor, 4) if on_arena_floor else 0,
+        'rightwall_gaze': round(rightwall_gaze_f / on_arena_floor, 4) if on_arena_floor else 0,
+        'other_gaze': round(other_gaze_f / on_arena_floor, 4) if on_arena_floor else 0,
+        'on_arena_floor': round(on_arena_floor / FRAMES_PER_SECOND, 4)
+    }
+
 def calculate_stats(df, trial_num):
     """
         Calculates movement, positional, and angle based statistics for a given locust video.
@@ -182,6 +290,10 @@ def calculate_stats(df, trial_num):
     df = df.copy()
     # Rename coords multiindex to stats to reflect all the additional data we are going to add to this level.
     df.columns = df.columns.rename("stats", level="coords")
+
+    # Convert all Y pixels to use bottom-left axis convention
+    for bodypart in df.columns.levels[0]:
+        df.loc[:, (bodypart, "y")] = Y_LIM - df.loc[:, (bodypart, "y")]
 
     # Convert X and Y pixel coordinates to centimeter distance immediately
     for bodypart in df.columns.levels[0]:
@@ -247,10 +359,17 @@ def calculate_stats(df, trial_num):
         distance_head = row["Head","distance"]
         distance_center = row["Center","distance"]
         turn_degree = row['turn_degree'][0]
-        x = row["Head", "x"]
-        y = row["Head", "y"]
+        x_head = row["Head", "x"]
+        y_head = row["Head", "y"]
+        x_center = row["Center", "x"]
+        y_center = row["Center", "y"]
         # Create a reusable boolean for whether the animal is inside the arena but not touching the walls
-        in_boundaries = (LEFT_STIMWALL_BOUNDARY_X <= x <= RIGHT_STIMWALL_BOUNDARY_X) and (TOP_WALL_BOUNDARY_Y >= y >= BOTTOM_WALL_BOUNDARY_Y)
+        in_boundaries = (
+                LEFT_STIMWALL_BOUNDARY_X < x_head < RIGHT_STIMWALL_BOUNDARY_X and
+                LEFT_STIMWALL_BOUNDARY_X < x_center < RIGHT_STIMWALL_BOUNDARY_X and
+                BOTTOM_WALL_BOUNDARY_Y < y_head < TOP_WALL_BOUNDARY_Y and
+                BOTTOM_WALL_BOUNDARY_Y < y_center < TOP_WALL_BOUNDARY_Y
+        )
         # If either the head or the centerpoint pass the movement threshold, and the angle passes the angle threshold,
         if (distance_head >= MOVEMENT_THRESHOLD_CM or distance_center >= MOVEMENT_THRESHOLD_CM) and abs(turn_degree) >= ANGLE_THRESHOLD:
             if in_boundaries:
@@ -308,14 +427,14 @@ def calculate_stats(df, trial_num):
     only_turns = [abs(turn) for turn in turns if turn != 0]
     avg_degree_size = sum(only_turns) / len(only_turns)
 
-    # Then, calculate the line perpendicular to the 2 eyes
+    # Using eye positions to calculate where the animal is looking at
+    gaze_dict = get_gaze_direction(df)
 
     # If asked to save hd5, then do
     if SAVE_HD5:
         df.to_hdf(f'Locust_stats_{trial_num}.h5', key='df', mode='w')
 
-    # Return the results as a dictionary
-    return {
+    ultimate_stats_dict = {
         'mean_velocity_cm_s': round(mean_velocity_persecond, 4),
         'distance_travelled_cm': round(distance_travelled, 4),
         'movement_duration': movement_dur_s,
@@ -331,7 +450,7 @@ def calculate_stats(df, trial_num):
         "total_turn_count": total_turns,
         "total_degrees_turned_abs": round(total_degrees_abs, 4),
         "turn_frequency_m": round(turn_frequency_m, 4),
-        "average_degrees_turned_abs": round(avg_degree_size,4 ),
+        "average_degrees_turned_abs": round(avg_degree_size, 4),
         "nowall_clockwise_turns": nowall_clockwise_turns,
         "nowall_counterclockwise_turns": nowall_counterclockwise_turns,
         "nowall_total_turn_count": nowall_total_turns,
@@ -339,6 +458,8 @@ def calculate_stats(df, trial_num):
         "nowall_turn_frequency_m": round(nowall_turn_frequency_m, 4),
         "nowall_average_degrees_turned_abs": round(nowall_avg_degree_size, 4)
     }
+    ultimate_stats_dict.update(gaze_dict)
+    return ultimate_stats_dict
 
 def plot_trial(df):
     """
@@ -413,7 +534,7 @@ if args["plot"]:
     plotdata.columns = plotdata.columns.droplevel('scorer')
     match = re.search(regexstring, args["plot"])
     trial_number = int(match.group(1)) if match else None
-    plot_trial(plotdata, trial_number)
+    plot_trial(plotdata)
     print(f"Showed plots for Trial {trial_number}. Use UI to adjust and save!")
     exit()
 
@@ -440,7 +561,8 @@ for dataset in os.listdir(data_directory):
         except ValueError as e:
             print(e)
             continue
-        stats = calculate_stats(finalDF, trial_number)
+        #TODO: CHANGE BACK TO FINALDF AFTER DEBUGGING IS OVER
+        stats = calculate_stats(locustdata, trial_number)
         stats["trial"] = trial_number
         stats_df = pd.concat([stats_df, pd.DataFrame([stats])], ignore_index=True)
 
