@@ -561,8 +561,11 @@ for dataset in os.listdir(data_directory):
         except ValueError as e:
             print(e)
             continue
-        #TODO: CHANGE BACK TO FINALDF AFTER DEBUGGING IS OVER
-        stats = calculate_stats(locustdata, trial_number)
+        #If debugging, use the non-trimmed video data so that the timestamps match the actual video
+        if DEBUG:
+            stats = calculate_stats(locustdata, trial_number)
+        else:
+            stats = calculate_stats(finalDF, trial_number)
         stats["trial"] = trial_number
         stats_df = pd.concat([stats_df, pd.DataFrame([stats])], ignore_index=True)
 
