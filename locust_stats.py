@@ -93,6 +93,7 @@ TOP_THIRD_BOUNDARY_Y = Y_LIM - 347
 BOTTOM_THIRD_BOUNDARY_Y = Y_LIM - 644
 HALFLINE_X = 589
 HALFLINE_Y = 496
+BOUNDARY_BUFFER = 10 # pixel buffer to boundary for "on floor of the arena" calculations for animals
 
 #PIXELS_TO_MM calculations
 ARENA_DIMENSION_CM_X = 35
@@ -104,8 +105,6 @@ pd.options.display.float_format = '{:.2f}'.format
 #MOVEMENT_THRESHOLD = 1.5 #How many pixels of movement per frame should be counted as movement from the animal
 #ANGLE_THRESHOLD = 1 # How many degrees of movement is valid detected movement
 #MOVEMENT_THRESHOLD_CM = 0.025
-
-test_file_name = "~/OneDrive/gabbiani/TOOLS/locust_tracker/trial_coordinates/david_165DLC_Resnet50_locustbehavior2Jan10shuffle5_snapshot_500.h5"
 
 # REMOVE LOW LIKELIHOOD COORDINATES AND SMOOTH OUT THE REST.
 def filter_and_smooth_predictions(videodata, likelihood_threshold=0.5, window_length=5, polyorder=2):
@@ -232,10 +231,10 @@ def get_gaze_direction(df):
 
         # Create a reusable boolean for whether the animal is inside the arena but not touching the walls
         in_boundaries = (
-                LEFT_STIMWALL_BOUNDARY_X < x_head < RIGHT_STIMWALL_BOUNDARY_X and
-                LEFT_STIMWALL_BOUNDARY_X < x_center < RIGHT_STIMWALL_BOUNDARY_X and
-                BOTTOM_WALL_BOUNDARY_Y < y_head < TOP_WALL_BOUNDARY_Y and
-                BOTTOM_WALL_BOUNDARY_Y < y_center < TOP_WALL_BOUNDARY_Y
+            (LEFT_STIMWALL_BOUNDARY_X + BOUNDARY_BUFFER)< x_head < (RIGHT_STIMWALL_BOUNDARY_X - BOUNDARY_BUFFER) and
+            (LEFT_STIMWALL_BOUNDARY_X + BOUNDARY_BUFFER) < x_center < (RIGHT_STIMWALL_BOUNDARY_X - BOUNDARY_BUFFER) and
+            (BOTTOM_WALL_BOUNDARY_Y + BOUNDARY_BUFFER) < y_head < (TOP_WALL_BOUNDARY_Y - BOUNDARY_BUFFER) and
+            (BOTTOM_WALL_BOUNDARY_Y + BOUNDARY_BUFFER) < y_center < (TOP_WALL_BOUNDARY_Y - BOUNDARY_BUFFER)
         )
 
         if in_boundaries:
@@ -290,10 +289,6 @@ def calculate_stats(df, trial_num):
     df = df.copy()
     # Rename coords multiindex to stats to reflect all the additional data we are going to add to this level.
     df.columns = df.columns.rename("stats", level="coords")
-
-    # Convert all Y pixels to use bottom-left axis convention
-    for bodypart in df.columns.levels[0]:
-        df.loc[:, (bodypart, "y")] = Y_LIM - df.loc[:, (bodypart, "y")]
 
     # Convert X and Y pixel coordinates to centimeter distance immediately
     for bodypart in df.columns.levels[0]:
@@ -365,10 +360,10 @@ def calculate_stats(df, trial_num):
         y_center = row["Center", "y"]
         # Create a reusable boolean for whether the animal is inside the arena but not touching the walls
         in_boundaries = (
-                LEFT_STIMWALL_BOUNDARY_X < x_head < RIGHT_STIMWALL_BOUNDARY_X and
-                LEFT_STIMWALL_BOUNDARY_X < x_center < RIGHT_STIMWALL_BOUNDARY_X and
-                BOTTOM_WALL_BOUNDARY_Y < y_head < TOP_WALL_BOUNDARY_Y and
-                BOTTOM_WALL_BOUNDARY_Y < y_center < TOP_WALL_BOUNDARY_Y
+                (LEFT_STIMWALL_BOUNDARY_X + BOUNDARY_BUFFER) < x_head < (RIGHT_STIMWALL_BOUNDARY_X - BOUNDARY_BUFFER) and
+                (LEFT_STIMWALL_BOUNDARY_X + BOUNDARY_BUFFER) < x_center < (RIGHT_STIMWALL_BOUNDARY_X - BOUNDARY_BUFFER) and
+                (BOTTOM_WALL_BOUNDARY_Y + BOUNDARY_BUFFER) < y_head < (TOP_WALL_BOUNDARY_Y - BOUNDARY_BUFFER) and
+                (BOTTOM_WALL_BOUNDARY_Y + BOUNDARY_BUFFER) < y_center < (TOP_WALL_BOUNDARY_Y - BOUNDARY_BUFFER)
         )
         # If either the head or the centerpoint pass the movement threshold, and the angle passes the angle threshold,
         if (distance_head >= MOVEMENT_THRESHOLD_CM or distance_center >= MOVEMENT_THRESHOLD_CM) and abs(turn_degree) >= ANGLE_THRESHOLD:
@@ -551,6 +546,7 @@ for dataset in os.listdir(data_directory):
         # BEGIN BY CLEANING UP THE .H5 DATAFRAME
         # Drop the 'scorer' level from the columns MultiIndex, since it's useless
         locustdata.columns = locustdata.columns.droplevel('scorer')
+
         # Invert Y-Axis to match classical graphing conventions
         y_columns = locustdata.loc[:, (slice(None), 'y')]
         locustdata.loc[:, (slice(None), 'y')] = Y_LIM - y_columns
