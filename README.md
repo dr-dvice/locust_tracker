@@ -7,7 +7,7 @@
 
 ## 📌 Description
 Locust Tracker is a Python-based tool for analyzing coordinates from DeepLabCut-analyzed videos. This is based on the behavioral arena setup as described in this 1993 paper [here](https://www.jstor.org/stable/49916).  Locust Tracker calculates detailed movement and positional metrics to analyze behavior in various experimental conditions.
-![Arena Boundary Coordinates](labelled_arena.jpg)
+![Arena Boundary Coordinates](https://github.com/dr-dvice/locust_tracker/blob/main/labelled_arena.png)
 The coordinates of the wall boundaries, as shown in this picture, can be edited in the code to suit your setup.
 
 ## 🚀 Features
