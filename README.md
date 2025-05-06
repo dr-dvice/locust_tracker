@@ -74,7 +74,7 @@ python locust_tracker.py ./data ./results -p Trial_01.h5
 ```
 
 ## 📜 License
-This project is licensed under the MIT License. See `LICENSE` for details.
+This project is licensed under the GPL-3.0 License. See `LICENSE` for details.
 
 ## 📧 Contact
 For questions or feedback, reach out via GitHub issues or email.

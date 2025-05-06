@@ -173,9 +173,6 @@ def fill_start_NaNs(df):
         df.loc[:valid_index, ["x", "y"]] = df.loc[:valid_index, ["x", "y"]].fillna({"x": first_x, "y": first_y})
     return df
 
-def point_slope_form(x1, y1, m, x):
-  return m * (x - x1) + y1
-
 def get_gaze_direction(df):
     """
     Calculates whether the animal is looking at the left or right wall
@@ -289,6 +286,10 @@ def calculate_stats(df, trial_num):
     df = df.copy()
     # Rename coords multiindex to stats to reflect all the additional data we are going to add to this level.
     df.columns = df.columns.rename("stats", level="coords")
+
+    # Calculate tracking accuracy for head and center
+    head_track_acc = df.loc[:, ("Head", "likelihood")].mean()
+    center_track_acc = df.loc[:, ("Center", "likelihood")].mean()
 
     # Convert X and Y pixel coordinates to centimeter distance immediately
     for bodypart in df.columns.levels[0]:
@@ -451,7 +452,9 @@ def calculate_stats(df, trial_num):
         "nowall_total_turn_count": nowall_total_turns,
         "nowall_degrees_turned_abs": round(nowall_total_degrees_abs, 4),
         "nowall_turn_frequency_m": round(nowall_turn_frequency_m, 4),
-        "nowall_average_degrees_turned_abs": round(nowall_avg_degree_size, 4)
+        "nowall_average_degrees_turned_abs": round(nowall_avg_degree_size, 4),
+        "average_head_tracking_accuracy": round(head_track_acc, 4),
+        "average_center_tracking_accuracy": round(center_track_acc, 4)
     }
     ultimate_stats_dict.update(gaze_dict)
     return ultimate_stats_dict
@@ -558,8 +561,13 @@ for dataset in os.listdir(data_directory):
             print(e)
             continue
         #If debugging, use the non-trimmed video data so that the timestamps match the actual video
+        # TODO: REIMPLEMENT LOW ACCURACY FRAME REMOVAL
         if DEBUG:
             stats = calculate_stats(locustdata, trial_number)
+            # Output tracking accuracy for each trial
+            print(f"Head tracking accuracy: {stats['average_head_tracking_accuracy']:.4f}")
+            print(f"Center tracking accuracy: {stats['average_center_tracking_accuracy']:.4f}")
+            print(f"Distance travelled CM: {stats['distance_travelled_cm']:.4f}")
         else:
             stats = calculate_stats(finalDF, trial_number)
         stats["trial"] = trial_number
