@@ -48,6 +48,10 @@ parser.add_argument("-m", "--movethresh", type=float,
 parser.add_argument("-a", "--anglethresh", type=float,
                     help="The threshold of angular change in degrees that is considered a turn in the script. The default is 1 degree per frame, but may be adjusted here.",
                     default=1)
+parser.add_argument("-i", "--likelihood", type=float,
+                    help="Tracking likelihood from DLC is calculated on a scale from 0 to 1, with one being highest confidence that the tracked body part is authentic. Here, you can set"
+                         " what tracking likelihood of the head and center should be the threshold for valid frames. Default is 0.5",
+                    default=0.5)
 parser.add_argument("-f", "--fps",
                     help="How many frames per second your videos were at when analyzed by DeepLabCut. Default is 2. Increasing this number may increase analysis time, especially"
                          " when generating the DeepLabCut coordinates.",
@@ -56,6 +60,8 @@ parser.add_argument("-h5", "--saveh5",  action="store_true",
                     help="Save updated .H5 data with calculated movement on each frame, distances, and angles.")
 parser.add_argument('-d', "--debug", action="store_true",
                     help="Output debug messages, graphs, and calculations.")
+parser.add_argument('-t', "--trackstats", action="store_true",
+                    help="Calculate and save information regarding tracking accuracy in the statistics")
 
 
 args = vars(parser.parse_args())
@@ -71,6 +77,9 @@ FRAMES_PER_SECOND = args["fps"]
 EXPECTED_VIDEO_LENGTH_S = args["length"]
 SAVE_HD5 = args["saveh5"]
 DEBUG = args["debug"]
+LIKELIHOOD_THRESHOLD = args["likelihood"]
+TRACKSTATS = args["trackstats"]
+MAX_INVALID_FRAMES = 6
 
 os.makedirs(results_folder, exist_ok=True)  # Create the folder if it doesn't exist
 
@@ -106,8 +115,23 @@ pd.options.display.float_format = '{:.2f}'.format
 #ANGLE_THRESHOLD = 1 # How many degrees of movement is valid detected movement
 #MOVEMENT_THRESHOLD_CM = 0.025
 
+def validate_dlc_dataframe(df, expected_bodyparts):
+    """
+    Args:
+        df: The .hdf5 dataframe from DLC
+        expected_bodyparts: List of expected bodyparts.
+    Raises: Value error if df fails validation
+    """
+    required_cols_per_bp = ['x', 'y', 'likelihood']
+    for bp in expected_bodyparts:
+        for col_prop in required_cols_per_bp:
+            if (bp, col_prop) not in df.columns:
+                raise ValueError(f"Missing expected column: { (bp, col_prop) }")
+    # Add any other checks for data types, ranges, etc.
+    print("DLC DataFrame integrity check passed.")
+
 # REMOVE LOW LIKELIHOOD COORDINATES AND SMOOTH OUT THE REST.
-def filter_and_smooth_predictions(videodata, likelihood_threshold=0.5, window_length=5, polyorder=2):
+def filter_and_smooth_predictions(videodata, likelihood_threshold=LIKELIHOOD_THRESHOLD, window_length=5, polyorder=2):
     """
     Filters low-likelihood predictions and applies Savitzky-Golay smoothing per body part.
 
@@ -173,6 +197,18 @@ def fill_start_NaNs(df):
         df.loc[:valid_index, ["x", "y"]] = df.loc[:valid_index, ["x", "y"]].fillna({"x": first_x, "y": first_y})
     return df
 
+# --- Helper function for finding low likelihood frame gaps ---
+def _calculate_max_consecutive_nans(series: pd.Series) -> int:
+    """Calculates the length of the longest consecutive run of NaNs in a Series."""
+    if series.empty:
+        return 0
+    is_na = series.isna()
+    if not is_na.any():
+        return 0
+    group_ids = is_na.ne(is_na.shift()).cumsum()
+    consecutive_nans_counts = is_na.groupby(group_ids).cumsum()
+    return int(consecutive_nans_counts.max())
+
 def get_gaze_direction(df):
     """
     Calculates whether the animal is looking at the left or right wall
@@ -181,34 +217,94 @@ def get_gaze_direction(df):
 
     Returns: a dictionary with the number of seconds the animal spent looking at the stimulus wall (or not)
     """
-    leftwall_gaze_f = 0
-    rightwall_gaze_f = 0
-    other_gaze_f = 0
-    onwalls = 0
+    # f indicates frames
+    gaze_data_total = {
+        "leftwall_gaze_f": 0,
+        "rightwall_gaze_f": 0,
+        "other_gaze_f": 0,
+        "onwalls_f": 0,
+        "uknown_gaze_f": 0
+    }
     dotprods = []
+    # TODO: See how often head is used instead of eyes
+    #usedeyes = 0
+    #usedhead = 0
+
+    def check_arenavector_bounds(vector_to_check, arena_bound_vectors, gaze_data):
+        if in_boundaries:
+            dotprod = np.dot(eye_vector, body_vector)
+            # In most situations on the arena floor, the eye vector should be perfectly perpendicular to the body vector
+            if DEBUG:
+                angle_error = 90 - abs(round(np.degrees(np.arccos(np.clip(dotprod, -1.0, 1.0))), 2))
+                if angle_error > 15:
+                    print(
+                        f"Bad eye vs. body orientation vectors at min {int(idx / FRAMES_PER_SECOND // 60)}:{int(idx / FRAMES_PER_SECOND % 60)}. Angle deviation of {angle_error:.2f}°")
+            dotprods.append(dotprod)
+            if vector_to_check[0] > 0:  # Positive gaze vector for x cartesian coordinate, animal is looking right
+                # Now check if y value of normalized vector is between the right stimwall bounds
+                if arena_bound_vectors["right_wall_vector_top"][1] >= vector_to_check[1] >= arena_bound_vectors["right_wall_vector_bottom"][1]:
+                    gaze_data["rightwall_gaze_f"] += 1
+                else:
+                    gaze_data["other_gaze_f"] += 1
+            elif vector_to_check[0] < 0:  # Negative gaze vector for x cartesian coordinate, animal is looking left
+                # Is it within left stimall wbounds?
+                if arena_bound_vectors["left_wall_vector_top"][1] >= vector_to_check[1] >= arena_bound_vectors["left_wall_vector_bottom"][1]:
+                    gaze_data["leftwall_gaze_f"] += 1
+                else:
+                    gaze_data["other_gaze_f"] += 1
+            else:
+                gaze_data["other_gaze_f"] += 1
+        else:
+            gaze_data["onwalls_f"] += 1
+
+        return gaze_data
+
     for idx, row in df.iterrows():
+        # Step 0: Look at likelihoods and figure out whether to use eyes or body vector
+        le_likelihood = row["Left-eye", "likelihood"]
+        re_likelihood = row["Right-eye", "likelihood"]
+        head_likelihood = row["Head", "likelihood"]
+        center_likelihood = row["Center", "likelihood"]
+
+        le_x, le_y = row["Left-eye", "x"], row["Left-eye", "y"]
+        re_x, re_y = row["Right-eye", "x"], row["Right-eye", "y"]
+        h_x, h_y = row["Head", "x"], row["Head", "y"]  # Can be NaN
+        c_x, c_y = row["Center", "x"], row["Center", "y"]  # Can be NaN
+
+        useEyes = False
+        useBodyvec = True
+        if np.isnan(c_x):
+            gaze_data_total["uknown_gaze_f"] += 1
+            continue
+        elif np.isnan(h_x):
+            useBodyvec = False
+        if le_likelihood >= LIKELIHOOD_THRESHOLD and re_likelihood >= LIKELIHOOD_THRESHOLD:
+            useEyes = True
+
+
         # Step 1: Save coordinates as numpy vectors
-        eye_left = np.array([row["Left-eye", "x"], row["Left-eye", "y"]])
-        eye_right = np.array([row["Right-eye", "x"], row["Right-eye", "y"]])
-        head = np.array([row["Head", "x"], row["Head", "y"]])
-        center = np.array([row["Center", "x"], row["Center", "y"]])
+        eye_left = np.array([le_x, le_y])
+        eye_right = np.array([re_x, re_y])
+        head = np.array([h_x, h_y])
+        center = np.array([c_x, c_y])
 
         # Step 2: Translate gaze
         eye_left = eye_left - center
         eye_right = eye_right - center
         head = head - center
-        center = center - center
+        center_zero = center - center
 
-        # Create vectors and normalize
+        # Create vectors and normalize (makes length of all vectors one, useful for comparisons) in our case,
+        # It's for comparing to the vectors corresponding to the arena boundaries later.
         eye_vector = eye_left - eye_right
         body_vector = head
-        gaze_vector = (eye_left - center) + (eye_right - center)
+        gaze_vector = eye_left + eye_right
 
         eye_vector /= np.linalg.norm(eye_vector)
         body_vector /= np.linalg.norm(body_vector)
         gaze_vector /= np.linalg.norm(gaze_vector)
 
-        # Step 3: Compute and normalize wall vectors (relative to arena center)
+        # Step 3: Compute and normalize wall vectors (relative to animal center)
         left_wall_vector_top = np.array([LEFT_STIMWALL_BOUNDARY_X, TOP_WALL_BOUNDARY_Y]) - center
         left_wall_vector_bottom = np.array([LEFT_STIMWALL_BOUNDARY_X, BOTTOM_WALL_BOUNDARY_Y]) - center
         right_wall_vector_top = np.array([RIGHT_STIMWALL_BOUNDARY_X , TOP_WALL_BOUNDARY_Y]) - center
@@ -219,6 +315,13 @@ def get_gaze_direction(df):
         left_wall_vector_bottom = left_wall_vector_bottom.astype(float) / np.linalg.norm(left_wall_vector_bottom)
         right_wall_vector_top = right_wall_vector_top.astype(float) / np.linalg.norm(right_wall_vector_top)
         right_wall_vector_bottom = right_wall_vector_bottom.astype(float) / np.linalg.norm(right_wall_vector_bottom)
+
+        arena_boundary_vectors = {
+            "left_wall_vector_top": left_wall_vector_top,
+            "left_wall_vector_bottom": left_wall_vector_bottom,
+            "right_wall_vector_top": left_wall_vector_top,
+            "right_wall_vector_bottom": right_wall_vector_bottom
+        }
 
         # Using same boolean as rest of the script for consistency
         x_head = row["Head", "x"]
@@ -235,27 +338,14 @@ def get_gaze_direction(df):
         )
 
         if in_boundaries:
-            dotprod = np.dot(eye_vector, body_vector)
-            if DEBUG:
-                angle_error =  90 - abs(round(np.degrees(np.arccos(np.clip(dotprod, -1.0, 1.0))), 2))
-                if angle_error > 15:
-                    print(f"Bad eye vs. body orientation vectors at min {int(idx/FRAMES_PER_SECOND//60)}:{int(idx/FRAMES_PER_SECOND%60)}. Angle deviation of {angle_error:.2f}°")
-            dotprods.append(dotprod)
-            if gaze_vector[0] > 0:
-                #looking right
-                if right_wall_vector_top[1] >= gaze_vector[1] >= right_wall_vector_bottom[1]:
-                    rightwall_gaze_f+=1
-                else:
-                    other_gaze_f+=1
-            elif gaze_vector[0] < 0:
-                if left_wall_vector_top[1] >= gaze_vector[1] >= left_wall_vector_bottom[1]:
-                    leftwall_gaze_f+=1
-                else:
-                    other_gaze_f+=1
-            else:
-                other_gaze_f+=1
-        else: onwalls +=1
-    on_arena_floor = FRAMES_EXPECTED - onwalls
+            if useEyes:
+                check_arenavector_bounds(gaze_vector, arena_boundary_vectors, gaze_data_total)
+            elif useBodyvec:
+                check_arenavector_bounds(body_vector, arena_boundary_vectors, gaze_data_total)
+        else:
+            gaze_data_total["onwalls_f"] +=1
+
+    on_arena_floor = (FRAMES_EXPECTED - gaze_data_total["onwalls_f"] - gaze_data_total["uknown_gaze_f"])
 
     if DEBUG:
         plt.figure(figsize=(8, 5))
@@ -267,12 +357,10 @@ def get_gaze_direction(df):
         plt.legend()
         plt.show()
 
-    return {
-        'leftwall_gaze': round(leftwall_gaze_f / on_arena_floor, 4) if on_arena_floor else 0,
-        'rightwall_gaze': round(rightwall_gaze_f / on_arena_floor, 4) if on_arena_floor else 0,
-        'other_gaze': round(other_gaze_f / on_arena_floor, 4) if on_arena_floor else 0,
-        'on_arena_floor': round(on_arena_floor / FRAMES_PER_SECOND, 4)
-    }
+    gaze_data_total["on_arena_floor_f"] = on_arena_floor
+
+    # TODO: FIGURE OUT IF YOU WANT TO COUNT FRAMES OR PERCENTAGE TIME SPENT LOOKING AT WALL OR WHATEVER ELSE
+    return gaze_data_total
 
 def calculate_stats(df, trial_num):
     """
@@ -291,7 +379,34 @@ def calculate_stats(df, trial_num):
     head_track_acc = df.loc[:, ("Head", "likelihood")].mean()
     center_track_acc = df.loc[:, ("Center", "likelihood")].mean()
 
-    # Convert X and Y pixel coordinates to centimeter distance immediately
+    # Flagging frames with bad head or center tracking
+    for bodypart in ["Head", "Center"]:
+        df.loc[:, (bodypart, "valid_tracking")] = df.loc[:, (bodypart, "likelihood")] >= LIKELIHOOD_THRESHOLD
+
+    # Interpolation of low-likelihood frames
+    bodyparts_to_interpolate = ["Head", "Center"]
+    for bodypart in bodyparts_to_interpolate:
+        for coord in ["x", "y"]:
+            original_coord_series = df.loc[:, (bodypart, coord)].copy()
+            likelihood_series = df.loc[:, (bodypart, "likelihood")]
+
+            coord_to_interpolate = original_coord_series.copy()
+            # Set coordinates to NaN where likelihood is low
+            coord_to_interpolate[likelihood_series < LIKELIHOOD_THRESHOLD] = np.nan
+
+            # Perform linear interpolation
+            interpolated_coord_series = coord_to_interpolate.interpolate(
+                method='linear',
+                limit=MAX_INVALID_FRAMES,
+                limit_direction='both'
+            )
+            df.loc[:, (bodypart, coord)] = interpolated_coord_series
+
+    largest_nan_gap_center = _calculate_max_consecutive_nans(df.loc[:, ("Center", "x")])
+    largest_nan_gap_head = _calculate_max_consecutive_nans(df.loc[:, ("Head", "x")])
+
+
+    # Convert X and Y pixel coordinates to centimeter distance after interpolation
     for bodypart in df.columns.levels[0]:
         df.loc[:, (bodypart, "x_cm")] = df.loc[:, (bodypart, "x")] * X_PIXEL_RATIO
         df.loc[:, (bodypart, "y_cm")] = df.loc[:, (bodypart, "y")] * Y_PIXEL_RATIO
@@ -305,27 +420,52 @@ def calculate_stats(df, trial_num):
 
     # For the Center, calculate the mean velocity (excluding points where the animal is not moving)
     valid_distances = df.loc[df["Center", "distance"] >= MOVEMENT_THRESHOLD_CM, ("Center","distance")]
-    distance_travelled = valid_distances.sum()
-    mean_velocity_perframe = distance_travelled / len(valid_distances) if len(valid_distances) > 0 else 0
+    distance_travelled = valid_distances.sum()  # .sum() skips NaNs by default
+    valid_distances_count = len(valid_distances.dropna()) # Count non-NaN valid distances
+
+    mean_velocity_perframe = distance_travelled / valid_distances_count if valid_distances_count > 0 else 0.0
     mean_velocity_persecond = mean_velocity_perframe * FRAMES_PER_SECOND
 
     # Cumulative movement duration
-    movement_dur_s = len(valid_distances) / FRAMES_PER_SECOND
+    movement_dur_s = valid_distances_count  / FRAMES_PER_SECOND
     nonmovement_dur_s = EXPECTED_VIDEO_LENGTH_S - movement_dur_s
 
-    # Calculate average distance from stimwall
-    if LEFT_STIMWALL_SIDE:
-        wall_distances = df['Center', 'x'].apply(lambda x: abs(x - LEFT_STIMWALL_BOUNDARY_X) if x > LEFT_STIMWALL_BOUNDARY_X else 0)
-    else:
-        wall_distances = df['Center', 'x'].apply(lambda x: abs(x - RIGHT_STIMWALL_BOUNDARY_X) if x < RIGHT_STIMWALL_BOUNDARY_X else 0)
-    avg_stimwall_dis_cm = wall_distances.mean() * X_PIXEL_RATIO
+    avg_stimwall_dis_cm = 0.0  # Default if 'Center'/'x' not found or all NaNs
+    if ("Center", "x") in df.columns:
+        center_x_pixels = df.loc[:, ('Center', 'x')]
+        # Initialize wall_distances_pixels with NaNs to handle cases where conditions aren't met or x is NaN
+        wall_distances_pixels = pd.Series(np.nan, index=df.index, dtype=float)
+
+        if LEFT_STIMWALL_SIDE:
+            # mask inbounds -> within the arena on right side of left wall
+            mask_inbounds = center_x_pixels > LEFT_STIMWALL_BOUNDARY_X
+            wall_distances_pixels.loc[mask_inbounds] = abs(center_x_pixels.loc[mask_inbounds] - LEFT_STIMWALL_BOUNDARY_X)
+            # Points validly at or before the wall (distance is 0)
+            mask_at_or_before = center_x_pixels <= LEFT_STIMWALL_BOUNDARY_X
+            wall_distances_pixels.loc[mask_at_or_before] = 0
+        else:  # RIGHT_STIMWALL_SIDE
+            mask_inbounds = center_x_pixels < RIGHT_STIMWALL_BOUNDARY_X
+            wall_distances_pixels.loc[mask_inbounds] = abs(center_x_pixels.loc[mask_inbounds] - RIGHT_STIMWALL_BOUNDARY_X)
+            mask_at_or_before = center_x_pixels >= RIGHT_STIMWALL_BOUNDARY_X
+            wall_distances_pixels.loc[mask_at_or_before] = 0
+
+        # NaNs in center_x_pixels will result in NaNs in wall_distances_pixels at those positions
+        # .mean() skips NaNs by default
+        avg_stimwall_dis_pixels = wall_distances_pixels.mean()
+        avg_stimwall_dis_cm = avg_stimwall_dis_pixels * X_PIXEL_RATIO if pd.notna(avg_stimwall_dis_pixels) else 0.0
+
 
     # Time Spent in Each of the 3 zones
-    left_zone_time = df[df['Center', 'x'] <= LEFT_THIRD_BOUNDARY_X].shape[0]
-    center_zone_time = df[(df['Center', 'x'] > LEFT_THIRD_BOUNDARY_X) & (df['Center', 'x'] <= RIGHT_THIRD_BOUNDARY_X)].shape[0]
-    right_zone_time = df[df['Center', 'x'] > RIGHT_THIRD_BOUNDARY_X].shape[0]
-    left_half_time = df[df['Center', 'x'] < HALFLINE_X].shape[0]
-    right_half_time = df[df['Center', 'x'] > HALFLINE_X].shape[0]
+    center_x_for_zones = df.loc[:, ('Center', 'x')].dropna() # Drop NAs.
+    left_zone_time = center_x_for_zones[center_x_for_zones <= LEFT_THIRD_BOUNDARY_X].shape[0] / FRAMES_PER_SECOND
+    center_zone_time = center_x_for_zones[(center_x_for_zones > LEFT_THIRD_BOUNDARY_X) & (center_x_for_zones <= RIGHT_THIRD_BOUNDARY_X)].shape[0] / FRAMES_PER_SECOND
+    right_zone_time = center_x_for_zones[center_x_for_zones > RIGHT_THIRD_BOUNDARY_X].shape[0] / FRAMES_PER_SECOND
+    left_half_time = center_x_for_zones[center_x_for_zones < HALFLINE_X].shape[0] / FRAMES_PER_SECOND
+    right_half_time = center_x_for_zones[center_x_for_zones > HALFLINE_X].shape[0] / FRAMES_PER_SECOND
+
+    # Number of frames not assigned to Left, Right, Or Center zones
+    seconds_in_lcr_zones = left_zone_time + center_zone_time + right_zone_time
+    unassigned_lcr_zone_seconds = EXPECTED_VIDEO_LENGTH_S - seconds_in_lcr_zones
 
     # ANGLE and turn frequencies
     # First, calculate the slope for the body (Head and centerpoint)
@@ -334,129 +474,150 @@ def calculate_stats(df, trial_num):
     current_slope = df['slope']
     prev_slope = df['slope'].shift(1)
     # Compute the angle using the arctan formula
-    angle = np.degrees(np.arctan((current_slope - prev_slope) / (1 + current_slope * prev_slope)))
+    with np.errstate(divide='ignore', invalid='ignore'):
+        angle_rad = np.arctan((current_slope - prev_slope) / (1 + current_slope * prev_slope))
+    angle_deg = np.degrees(angle_rad)
     # Determine the sign of the angle based on the cross product
-    # (y1-y0)*(x2-x1) - (x1-x0)*(y2-y1)
-    cross_product = ((df[('Head', 'y')] - df[('Center', 'y')]) * (
-                df[('Head', 'x')].shift(-1) - df[('Center', 'x')].shift(-1)) -
-                     (df[('Head', 'x')] - df[('Center', 'x')]) * (
-                                 df[('Head', 'y')].shift(-1) - df[('Center', 'y')].shift(-1)))
+    vx_t = df[('Head', 'x')] - df[('Center', 'x')]
+    vy_t = df[('Head', 'y')] - df[('Center', 'y')]
+    vx_tplus1 = (df[('Head', 'x')].shift(-1) - df[('Center', 'x')].shift(-1))
+    vy_tplus1 = (df[('Head', 'y')].shift(-1) - df[('Center', 'y')].shift(-1))
+    cross_product = (vy_t * vx_tplus1) - (vx_t * vy_tplus1)
     # Positive angle = clockwise, negative = counterclockwise
-    df['turn_degree'] = np.where(cross_product > 0, -angle, angle)
+    df['turn_degree'] = np.where(cross_product > 0, -angle_deg, angle_deg)
     # Handle the first row's turn_degree (same as the second)
-    df['turn_degree'].iloc[0] = df['turn_degree'].iloc[1]
+    if not df.empty:
+        df['turn_degree'].iloc[0] = df['turn_degree'].iloc[1] if len(df) > 1 else np.nan
 
     # CREATE 2 LISTS OF ALL THE TURNS THE ANIMAL PERFORMS DURING THE EXPERIMENTS
     turns = []
     nowallturns = []
 
-    # TODO: CHECK NA HANDLING
     for idx, row in df.iterrows():
-        distance_head = row["Head","distance"]
-        distance_center = row["Center","distance"]
-        turn_degree = row['turn_degree'][0]
-        x_head = row["Head", "x"]
-        y_head = row["Head", "y"]
-        x_center = row["Center", "x"]
-        y_center = row["Center", "y"]
+        distance_head = row[("Head", "distance")]
+        distance_center = row[("Center", "distance")]
+        turn_degree_val = row.get('turn_degree', np.nan).item()
+        x_head = row[("Head", "x")]
+        y_head = row[("Head", "y")]
+        x_center = row[("Center", "x")]
+        y_center = row[("Center", "y")]
+        coords_are_valid = pd.notna(x_head) and pd.notna(y_head) and \
+                           pd.notna(x_center) and pd.notna(y_center)
         # Create a reusable boolean for whether the animal is inside the arena but not touching the walls
-        in_boundaries = (
-                (LEFT_STIMWALL_BOUNDARY_X + BOUNDARY_BUFFER) < x_head < (RIGHT_STIMWALL_BOUNDARY_X - BOUNDARY_BUFFER) and
-                (LEFT_STIMWALL_BOUNDARY_X + BOUNDARY_BUFFER) < x_center < (RIGHT_STIMWALL_BOUNDARY_X - BOUNDARY_BUFFER) and
-                (BOTTOM_WALL_BOUNDARY_Y + BOUNDARY_BUFFER) < y_head < (TOP_WALL_BOUNDARY_Y - BOUNDARY_BUFFER) and
-                (BOTTOM_WALL_BOUNDARY_Y + BOUNDARY_BUFFER) < y_center < (TOP_WALL_BOUNDARY_Y - BOUNDARY_BUFFER)
-        )
+        in_boundaries = False
+        if coords_are_valid:
+            in_boundaries = (
+                    (LEFT_STIMWALL_BOUNDARY_X + BOUNDARY_BUFFER) < x_head < (RIGHT_STIMWALL_BOUNDARY_X - BOUNDARY_BUFFER) and
+                    (LEFT_STIMWALL_BOUNDARY_X + BOUNDARY_BUFFER) < x_center < (RIGHT_STIMWALL_BOUNDARY_X - BOUNDARY_BUFFER) and
+                    (BOTTOM_WALL_BOUNDARY_Y + BOUNDARY_BUFFER) < y_head < (TOP_WALL_BOUNDARY_Y - BOUNDARY_BUFFER) and
+                    (BOTTOM_WALL_BOUNDARY_Y + BOUNDARY_BUFFER) < y_center < (TOP_WALL_BOUNDARY_Y - BOUNDARY_BUFFER)
+            )
+
         # If either the head or the centerpoint pass the movement threshold, and the angle passes the angle threshold,
-        if (distance_head >= MOVEMENT_THRESHOLD_CM or distance_center >= MOVEMENT_THRESHOLD_CM) and abs(turn_degree) >= ANGLE_THRESHOLD:
-            if in_boundaries:
-                # If the angle turn is a continuation of the one from the last frame, add it.
-                if nowallturns[-1] is None: # The animal has just returned inside the boundary limit
-                    nowallturns.append(turn_degree)
-                elif np.sign(nowallturns[-1]) == np.sign(turn_degree):
-                    nowallturns[-1] += turn_degree #add to last angle turn from previous frame
-                else : # Otherwise, the animal started turning in the other direction, there are no elements in the list yet,
-                    nowallturns.append(turn_degree)
-                # If the angle turn is a continuation of the one from the last frame, add it.
+        is_significant_turn = ((pd.notna(distance_head) and distance_head >= MOVEMENT_THRESHOLD_CM) or
+                                (pd.notna(distance_center) and distance_center >= MOVEMENT_THRESHOLD_CM)) \
+                              and (pd.notna(turn_degree_val) and abs(turn_degree_val) >= ANGLE_THRESHOLD)
+
+        if is_significant_turn:
             # Regardless of whether the animal was within the boundaries of the wall or not, we need to add it to the overall turns
-            if np.sign(turns[-1]) == np.sign(turn_degree):
-                turns[-1] += turn_degree
+            if turns and np.sign(turns[-1]) == np.sign(turn_degree_val) and turns[-1] != 0:
+                # If the angle turn is a continuation of the one from the last frame, add it.
+                turns[-1] += turn_degree_val  # add to last angle turn from previous frame
             else:
-                turns.append(turn_degree)
-        else: # If the thresholds are not reached, we determine that the values are just noise and the animal has not turned.
+                # Otherwise, the animal started turning in the other direction, or there are no elements in the list yet, or previous turn was 0.
+                turns.append(turn_degree_val)
+            if in_boundaries:
+                if not nowallturns:
+                    # First significant turn in boundaries, or list was empty.
+                    nowallturns.append(turn_degree_val)
+                elif nowallturns[-1] is None:
+                    # The animal has just returned inside the boundary limit
+                    nowallturns.append(turn_degree_val)
+                elif np.sign(nowallturns[-1]) == np.sign(turn_degree_val) and nowallturns[-1] != 0:
+                    # If the angle turn is a continuation of the one from the last frame, add it.
+                    nowallturns[-1] += turn_degree_val  # add to last angle turn from previous frame
+                else:
+                    # Otherwise, the animal started turning in the other direction, or previous turn was 0.
+                    nowallturns.append(turn_degree_val)
+        else:
+            # If the thresholds are not reached, we determine that the values are just noise and the animal has not turned.
             turns.append(0)
             if in_boundaries:
                 nowallturns.append(0)
-            else:
+            else:  # Not in boundaries or coords are NaN
                 nowallturns.append(None)
 
     # Now, we can calculate how many clockwise vs counterclockwise turns, total absolute value of turns, turn_frequency, average
-    # absolute turn size.
+    # absolute turn size, and prep all the other statistics as well.
 
-    # Clockwise turns
-    clockwise_turns = len([turn for turn in turns if turn > 0])
-    nowall_clockwise_turns = len([turn for turn in nowallturns if turn is not None and turn > 0])
-
-    # Counter-clockwise turns
-    counterclockwise_turns = len([turn for turn in turns if turn < 0])
-    nowall_counterclockwise_turns = len([turn for turn in nowallturns if turn is not None and turn < 0])
-
-    # Total turns
+    clockwise_turns = len([turn for turn in turns if pd.notna(turn) and turn > 0])
+    nowall_clockwise_turns = len([turn for turn in nowallturns if turn is not None and pd.notna(turn) and turn > 0])
+    counterclockwise_turns = len([turn for turn in turns if pd.notna(turn) and turn < 0])
+    nowall_counterclockwise_turns = len([turn for turn in nowallturns if turn is not None and pd.notna(turn) and turn < 0])
     total_turns = clockwise_turns + counterclockwise_turns
     nowall_total_turns = nowall_clockwise_turns + nowall_counterclockwise_turns
-
-    # Total degrees turned
-    total_degrees_abs = sum(abs(angle) for angle in turns)
-    nowall_total_degrees_abs = sum(abs(angle) for angle in nowallturns if angle is not None)
-
-    # Average turn frequency per minute
-    turn_frequency_m = total_turns / len(turns) / FRAMES_PER_SECOND * 60
-    nowall_valid_turns = [turn for turn in nowallturns if turn is not None]
-    nowall_valid_count = len(nowall_valid_turns)
-    nowall_only_turns = [abs(turn) for turn in nowallturns if turn != 0 and turn is not None]
-    if nowall_valid_count > 0:
-        nowall_turn_frequency_m = nowall_total_turns / nowall_valid_count / FRAMES_PER_SECOND * 60
-        nowall_avg_degree_size = sum(nowall_only_turns) / len(nowall_only_turns)
-    else:
-        nowall_turn_frequency_m = 0
-        nowall_avg_degree_size = 0
-    # Average turn size
-    only_turns = [abs(turn) for turn in turns if turn != 0]
-    avg_degree_size = sum(only_turns) / len(only_turns)
+    total_degrees_abs = np.nansum([abs(angle) for angle in turns if pd.notna(angle)])
+    nowall_total_degrees_abs = np.nansum([abs(angle) for angle in nowallturns if angle is not None and pd.notna(angle)])
+    turn_freq_denominator_s = (len(turns) / FRAMES_PER_SECOND) if FRAMES_PER_SECOND > 0 else 0
+    turn_frequency_m = (total_turns / turn_freq_denominator_s * 60) if turn_freq_denominator_s > 0 else 0.0
+    nowall_valid_turn_entries = [turn for turn in nowallturns if turn is not None]
+    nowall_freq_denominator_s = (len(nowall_valid_turn_entries) / FRAMES_PER_SECOND) if FRAMES_PER_SECOND > 0 else 0
+    nowall_turn_frequency_m = (nowall_total_turns / nowall_freq_denominator_s * 60) if nowall_freq_denominator_s > 0 else 0.0
+    only_significant_turns = [abs(turn) for turn in turns if pd.notna(turn) and turn != 0]
+    avg_degree_size = np.sum(only_significant_turns) / len(only_significant_turns) if len(only_significant_turns) > 0 else 0.0
+    nowall_only_significant_turns = [abs(turn) for turn in nowallturns if turn is not None and pd.notna(turn) and turn != 0]
+    nowall_avg_degree_size = np.sum(nowall_only_significant_turns) / len(nowall_only_significant_turns) if len(nowall_only_significant_turns) > 0 else 0.0
 
     # Using eye positions to calculate where the animal is looking at
     gaze_dict = get_gaze_direction(df)
 
-    # If asked to save hd5, then do
     if SAVE_HD5:
-        df.to_hdf(f'Locust_stats_{trial_num}.h5', key='df', mode='w')
+        try:
+            df.to_hdf(f'Locust_stats_{trial_num}.h5', key='df', mode='w')
+        except Exception as YIKES:
+            print(f"Error saving HDF5 file for trial {trial_num}: {YIKES}")
+
+    def finalize_stat(value, is_count=False, digits=4):
+        if pd.isna(value):
+            return 0 if is_count else 0.0
+        return round(value, digits) if not is_count else int(value)
 
     ultimate_stats_dict = {
-        'mean_velocity_cm_s': round(mean_velocity_persecond, 4),
-        'distance_travelled_cm': round(distance_travelled, 4),
-        'movement_duration': movement_dur_s,
-        "nonmovement_duration": nonmovement_dur_s,
-        "avg_distance_from_stimwall": round(avg_stimwall_dis_cm, 4),
-        "left_zone_time": left_zone_time,
-        "center_zone_time": center_zone_time,
-        "right_zone_time": right_zone_time,
-        "left_half_time": left_half_time,
-        "right_half_time": right_half_time,
-        "clockwise_turns": clockwise_turns,
-        "counterclockwise_turns": counterclockwise_turns,
-        "total_turn_count": total_turns,
-        "total_degrees_turned_abs": round(total_degrees_abs, 4),
-        "turn_frequency_m": round(turn_frequency_m, 4),
-        "average_degrees_turned_abs": round(avg_degree_size, 4),
-        "nowall_clockwise_turns": nowall_clockwise_turns,
-        "nowall_counterclockwise_turns": nowall_counterclockwise_turns,
-        "nowall_total_turn_count": nowall_total_turns,
-        "nowall_degrees_turned_abs": round(nowall_total_degrees_abs, 4),
-        "nowall_turn_frequency_m": round(nowall_turn_frequency_m, 4),
-        "nowall_average_degrees_turned_abs": round(nowall_avg_degree_size, 4),
-        "average_head_tracking_accuracy": round(head_track_acc, 4),
-        "average_center_tracking_accuracy": round(center_track_acc, 4)
+        'mean_velocity_cm_s': finalize_stat(mean_velocity_persecond),
+        'distance_travelled_cm': finalize_stat(distance_travelled),
+        'movement_duration': finalize_stat(movement_dur_s),
+        "nonmovement_duration": finalize_stat(nonmovement_dur_s),
+        "avg_distance_from_stimwall": finalize_stat(avg_stimwall_dis_cm),
+        "left_zone_time": finalize_stat(left_zone_time, is_count=True),
+        "center_zone_time": finalize_stat(center_zone_time, is_count=True),
+        "right_zone_time": finalize_stat(right_zone_time, is_count=True),
+        "left_half_time": finalize_stat(left_half_time, is_count=True),
+        "right_half_time": finalize_stat(right_half_time, is_count=True),
+        "clockwise_turns": finalize_stat(clockwise_turns, is_count=True),
+        "counterclockwise_turns": finalize_stat(counterclockwise_turns, is_count=True),
+        "total_turn_count": finalize_stat(total_turns, is_count=True),
+        "total_degrees_turned_abs": finalize_stat(total_degrees_abs),
+        "turn_frequency_m": finalize_stat(turn_frequency_m),
+        "average_degrees_turned_abs": finalize_stat(avg_degree_size),
+        "nowall_clockwise_turns": finalize_stat(nowall_clockwise_turns, is_count=True),
+        "nowall_counterclockwise_turns": finalize_stat(nowall_counterclockwise_turns, is_count=True),
+        "nowall_total_turn_count": finalize_stat(nowall_total_turns, is_count=True),
+        "nowall_total_degrees_turned_abs": finalize_stat(nowall_total_degrees_abs),
+        "nowall_turn_frequency_m": finalize_stat(nowall_turn_frequency_m),
+        "nowall_average_degrees_turned_abs": finalize_stat(nowall_avg_degree_size),
+        "average_head_tracking_accuracy": finalize_stat(head_track_acc),
+        "average_center_tracking_accuracy": finalize_stat(center_track_acc),
+        "unassigned_lcr_zone_seconds": finalize_stat(unassigned_lcr_zone_seconds, is_count=True),
+        "largest_nan_gap_center": finalize_stat(largest_nan_gap_center, is_count=True),
+        "largest_nan_gap_head": finalize_stat(largest_nan_gap_head, is_count=True),
     }
     ultimate_stats_dict.update(gaze_dict)
+    if not TRACKSTATS:
+        ultimate_stats_dict.pop("largest_nan_gap_center")
+        ultimate_stats_dict.pop("largest_nan_gap_head")
+        ultimate_stats_dict.pop("unassigned_lcr_zone_frames")
+        ultimate_stats_dict.pop("average_head_tracking_accuracy")
+        ultimate_stats_dict.pop("average_center_tracking_accuracy")
     return ultimate_stats_dict
 
 def plot_trial(df):
@@ -561,7 +722,6 @@ for dataset in os.listdir(data_directory):
             print(e)
             continue
         #If debugging, use the non-trimmed video data so that the timestamps match the actual video
-        # TODO: REIMPLEMENT LOW ACCURACY FRAME REMOVAL
         if DEBUG:
             stats = calculate_stats(locustdata, trial_number)
             # Output tracking accuracy for each trial

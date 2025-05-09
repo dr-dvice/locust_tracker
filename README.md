@@ -56,6 +56,8 @@ python locust_tracker.py data_directory results_folder [options]
 - `-f, --fps`: Frames per second used for analysis (default: `2`).
 - `-h5, --saveh5`: Save updated `.h5` data with calculated movement, distances, and angles.
 - `-d, --debug`: Enable debug mode with additional outputs and visualizations.
+- `-i, --likelihood`: Set low-likelihood threshold on a scale of 0 to 1 (default: `0.5`).
+- `-t, --trackstats`: Calculate and save information regarding tracking accuracy in the statistics.
 
 ## 🧪 Examples
 Analyze data with default options:
@@ -63,15 +65,33 @@ Analyze data with default options:
 python locust_tracker.py ./data ./results
 ```
 
-Specify a left-side stimulus and a custom video length:
+Specify a left-side stimulus, a custom video length, and save tracking accuracy info:
 ```bash
-python locust_tracker.py ./data ./results -s left -l 300
+python locust_tracker.py ./data ./results -s left -l 300 -t
 ```
 
 Plot movement for a specific trial to determine thresholds:
 ```bash
 python locust_tracker.py ./data ./results -p Trial_01.h5
 ```
+
+## 📝 Patch Notes
+### Version 1.2.0
+**Robustness To Tracking Errors - Handling Low Likelihoods**
+- Major overhaul of tracking statistics calculations now interpolates coordinates for low-likelihood values.
+- New parameters: 
+  - MAX_INVALID_FRAMES sets max interpolation lengths for low-likelihood values. 
+  - LIKELIHOOD_THRESHOLD (see -i under optional arguments) sets threshold for low-likelihood values. 
+  - TRACKSTATS (see -t under optional arguments) allows user to save data regarding tracking accuracy.
+- Low-likelihood blocks higher than MAX_INVALID_FRAMES will now have their coordinates set to NaN (NULL).
+- The interpolation is linear and covers up to MAX_INVALID_FRAMES forward and backwards. (Temporary, will be
+ revisited in 1.2.1)
+- Tracking stat calculations now handle NaN values.
+- Gaze stat calculations now handle NaN and low-likelihood values.
+- Gaze stat now uses center-head vector as backup to eyes vector when applicable in low-likelihood scenarios.
+- Fixed bug causing the center of the animal for gaze calculations to be set incorrectly in previous versions.
+- Improvements to code quality and readability.
+
 
 ## 📜 License
 This project is licensed under the GPL-3.0 License. See `LICENSE` for details.
