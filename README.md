@@ -5,12 +5,12 @@
 ![Issues](https://img.shields.io/github/issues/dr-dvice/locust_tracker)
 ![Last Commit](https://img.shields.io/github/last-commit/dr-dvice/locust_tracker)
 
-## 📌 Description
+## Description
 Locust Tracker is a Python-based tool for analyzing coordinates from DeepLabCut-analyzed videos. This is based on the behavioral arena setup as described in this 1993 paper [here](https://www.jstor.org/stable/49916).  Locust Tracker calculates detailed movement and positional metrics to analyze behavior in various experimental conditions.
 ![Arena Boundary Coordinates](https://github.com/dr-dvice/locust_tracker/blob/main/labelled_arena.png)
 The coordinates of the wall boundaries, as shown in this picture, can be edited in the code to suit your setup.
 
-## 🚀 Features
+## Features
 - Downstream coordinate data processing from DeepLabCut
 - In-depth analysis of movement, positional, and rotational statistics
 - Can quickly analyze hundreds of videos
@@ -35,7 +35,7 @@ conda activate locust_tracker
 conda install --file locustrequirements.txt
 ```
 
-## 📦 Usage
+## Usage
 To analyze videos using Locust Tracker:
 
 ```bash
@@ -59,15 +59,15 @@ python locust_tracker.py data_directory results_folder [options]
 - `-i, --likelihood`: Set low-likelihood threshold on a scale of 0 to 1 (default: `0.5`).
 - `-t, --trackstats`: Calculate and save information regarding tracking accuracy in the statistics.
 
-## 🧪 Examples
+## Examples
 Analyze data with default options:
 ```bash
 python locust_tracker.py ./data ./results
 ```
 
-Specify a left-side stimulus, a custom video length, and save tracking accuracy info:
+Specify a left-side stimulus and a custom video length:
 ```bash
-python locust_tracker.py ./data ./results -s left -l 300 -t
+python locust_tracker.py ./data ./results -s left -l 300
 ```
 
 Plot movement for a specific trial to determine thresholds:
@@ -75,7 +75,16 @@ Plot movement for a specific trial to determine thresholds:
 python locust_tracker.py ./data ./results -p Trial_01.h5
 ```
 
+## License
+This project is licensed under the GPL-3.0 License. See `LICENSE` for details.
+
 ## 📝 Patch Notes
+
+### Version 1.2.1
+
+**Stricter Low Likelihood Tracking Handling**
+- Frames are now not interpolated at all if gap is larger than MAX_INVALID_FRAMES
+
 ### Version 1.2.0
 **Robustness To Tracking Errors - Handling Low Likelihoods**
 - Major overhaul of tracking statistics calculations now interpolates coordinates for low-likelihood values.
@@ -92,11 +101,7 @@ python locust_tracker.py ./data ./results -p Trial_01.h5
 - Fixed bug causing the center of the animal for gaze calculations to be set incorrectly in previous versions.
 - Improvements to code quality and readability.
 
-
-## 📜 License
-This project is licensed under the GPL-3.0 License. See `LICENSE` for details.
-
-## 📧 Contact
+## Contact
 For questions or feedback, reach out via GitHub issues or email.
 
 ---

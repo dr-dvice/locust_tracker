@@ -209,6 +209,21 @@ def _calculate_max_consecutive_nans(series: pd.Series) -> int:
     consecutive_nans_counts = is_na.groupby(group_ids).cumsum()
     return int(consecutive_nans_counts.max())
 
+# Helper function for finding gaps longer than MAX_INVALID_FRAMES
+def get_indices_of_long_nan_gaps(series: pd.Series, max_gap_length: int) -> pd.Index:
+    is_nan = series.isna()
+    if not is_nan.any():
+        return pd.Index([])
+
+    nan_group_ids = is_nan.ne(is_nan.shift()).cumsum()
+    actual_nan_block_ids = nan_group_ids[is_nan]
+    if actual_nan_block_ids.empty:
+        return pd.Index([])
+
+    nan_block_lengths = series[is_nan].groupby(actual_nan_block_ids).transform('size')
+    long_gap_nan_indices = nan_block_lengths[nan_block_lengths > max_gap_length].index
+    return long_gap_nan_indices
+
 def get_gaze_direction(df):
     """
     Calculates whether the animal is looking at the left or right wall
@@ -391,15 +406,21 @@ def calculate_stats(df, trial_num):
             likelihood_series = df.loc[:, (bodypart, "likelihood")]
 
             coord_to_interpolate = original_coord_series.copy()
-            # Set coordinates to NaN where likelihood is low
             coord_to_interpolate[likelihood_series < LIKELIHOOD_THRESHOLD] = np.nan
 
-            # Perform linear interpolation
+            indices_to_keep_as_nan = get_indices_of_long_nan_gaps(
+                coord_to_interpolate, MAX_INVALID_FRAMES
+            )
+
             interpolated_coord_series = coord_to_interpolate.interpolate(
                 method='linear',
                 limit=MAX_INVALID_FRAMES,
                 limit_direction='both'
             )
+
+            if not indices_to_keep_as_nan.empty:
+                interpolated_coord_series.loc[indices_to_keep_as_nan] = np.nan
+
             df.loc[:, (bodypart, coord)] = interpolated_coord_series
 
     largest_nan_gap_center = _calculate_max_consecutive_nans(df.loc[:, ("Center", "x")])
