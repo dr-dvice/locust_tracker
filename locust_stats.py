@@ -744,7 +744,7 @@ def calculate_stats(df, trial_num):
     if not TRACKSTATS:
         ultimate_stats_dict.pop("largest_nan_gap_center")
         ultimate_stats_dict.pop("largest_nan_gap_head")
-        ultimate_stats_dict.pop("unassigned_lcr_zone_frames")
+        ultimate_stats_dict.pop("unassigned_lcr_zone_seconds")
         ultimate_stats_dict.pop("average_head_tracking_accuracy")
         ultimate_stats_dict.pop("average_center_tracking_accuracy")
     return ultimate_stats_dict
