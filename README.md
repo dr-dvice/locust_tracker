@@ -58,6 +58,10 @@ python locust_tracker.py data_directory results_folder [options]
 - `-d, --debug`: Enable debug mode with additional outputs and visualizations.
 - `-i, --likelihood`: Set low-likelihood threshold on a scale of 0 to 1 (default: `0.5`).
 - `-t, --trackstats`: Calculate and save information regarding tracking accuracy in the statistics.
+- `-md, --metadata`:  Path to an Excel or .csv spreadsheet containg metadata corresponding to the video trial numbers. Will dynamically update the stimulus side if a "Stimulus Side" column is provided.
+
+
+Use `-h` or `--help` for more information on the available parameters.
 
 ## Examples
 Analyze data with default options:
@@ -79,6 +83,14 @@ python locust_tracker.py ./data ./results -p Trial_01.h5
 This project is licensed under the GPL-3.0 License. See `LICENSE` for details.
 
 ## 📝 Patch Notes
+
+### Version 1.2.2
+
+**Basic Metadata Implementation**
+
+- Program can now read in a metadata spreadsheet (.csv or excel) and automatically output certain information along with the results data.
+  - New parameter: METADATA_FILE_NAME (see -md under optional arguments)
+- Method calculate_stats can now use the`Stimulus Side` information provided in a metadata spreadsheet to dynamically adjust the stimulus side during relevant calculations.
 
 ### Version 1.2.1
 

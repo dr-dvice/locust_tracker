@@ -62,6 +62,11 @@ parser.add_argument('-d', "--debug", action="store_true",
                     help="Output debug messages, graphs, and calculations.")
 parser.add_argument('-t', "--trackstats", action="store_true",
                     help="Calculate and save information regarding tracking accuracy in the statistics")
+parser.add_argument("-md", "--metadata", type=str,
+                    help="A path to an excel or .csv spreadsheet containg metadata corresponding to the video trial numbers. If a `Stimulus Side` column is included, it will be used to dynamically adjust"
+                         "the stimulus side used for related calculations. This will override the `-s` `--stimulus` parameter where necessary.")
+
+
 
 
 args = vars(parser.parse_args())
@@ -79,6 +84,7 @@ SAVE_HD5 = args["saveh5"]
 DEBUG = args["debug"]
 LIKELIHOOD_THRESHOLD = args["likelihood"]
 TRACKSTATS = args["trackstats"]
+METADATA_FILE_NAME = args["metadata"]
 MAX_INVALID_FRAMES = 6
 
 os.makedirs(results_folder, exist_ok=True)  # Create the folder if it doesn't exist
@@ -130,7 +136,103 @@ def validate_dlc_dataframe(df, expected_bodyparts):
     # Add any other checks for data types, ranges, etc.
     print("DLC DataFrame integrity check passed.")
 
-# REMOVE LOW LIKELIHOOD COORDINATES AND SMOOTH OUT THE REST.
+def load_metadata_spreadsheet(file_path: str):
+    # -> pd.DataFrame or None
+    """
+    Reads an Excel (.xlsx) or CSV (.csv) file containing metadata information for the trials
+    Returns the DataFrame or None if an error occurs or format is unsupported.
+    """
+    try:
+        if file_path.endswith('.csv'):
+            df = pd.read_csv(file_path)
+        elif file_path.endswith(('.xls', '.xlsx')):
+            df = pd.read_excel(file_path)
+        else:
+            print(f"Unsupported file format: {file_path}. Please use .csv or .xlsx.")
+            return None
+        df = df.dropna()
+        return df
+    except FileNotFoundError:
+        print(f"Error: File not found at {file_path}")
+        return None
+    except Exception as e:
+        print(f"Error reading file {file_path}: {e}")
+        return None
+
+def _find_actual_column_name(df_columns: list, primary_target_name: str, alternative_target_names: list = None):
+    """
+    Helper to find the actual column name in a list of df_columns, case-insensitively.
+    Checks primary_target_name first, then any alternative_target_names.
+    """
+    primary_target_lower = primary_target_name.lower()
+    for col in df_columns:
+        if col.lower() == primary_target_lower:
+            return col
+
+    if alternative_target_names:
+        for alt_name in alternative_target_names:
+            alt_name_lower = alt_name.lower()
+            for col in df_columns:
+                if col.lower() == alt_name_lower:
+                    return col
+    return None
+
+def extract_metadata_for_trial(metadata_df: pd.DataFrame, trial_number_to_find):
+    """
+    Extracts metadata for a specific trial number from the provided DataFrame.
+    Args:
+        metadata_df: Pandas DataFrame containing the metadata.
+        trial_number_to_find: The trial number to search for (can be int or str).
+    Returns:
+        A dictionary with "Species", "Sex", "Treatment", and "StimulusSide"
+        if the trial is found and columns exist. Otherwise, an empty dictionary.
+    """
+    if metadata_df is None or metadata_df.empty:
+        return None
+
+    extracted_info = {}
+    df_columns_list = metadata_df.columns.tolist()
+    actual_trial_col_name = _find_actual_column_name(df_columns_list, "trial", ["Trials"])
+
+    if not actual_trial_col_name:
+        return None
+
+    # Convert Trial column to int first
+    try:
+        metadata_df[actual_trial_col_name] = metadata_df[actual_trial_col_name].astype(int)
+    except (ValueError, TypeError) as e:
+        print("Problem parsing trial numbers from Trial column in metadata: ", e)
+        exit()
+
+    try:
+        condition = metadata_df[actual_trial_col_name].astype(str).str.lower() == str(trial_number_to_find).lower()
+        matching_rows = metadata_df[condition]
+    except AttributeError:
+        condition = metadata_df[actual_trial_col_name].astype(str) == str(trial_number_to_find)
+        matching_rows = metadata_df[condition]
+    except Exception:
+        return None
+
+    if matching_rows.empty:
+        return None
+
+    trial_data_row = matching_rows.iloc[0]
+
+    columns_to_extract_map = {
+        "Species": ("Species", []),
+        "Sex": ("Sex", []),
+        "Treatment": ("Treatment", ["treat"]),
+        "StimulusSide": ("StimulusSide", ["Stimulus Side","stim_side"])
+    }
+
+    for output_key, (primary_name, alt_names) in columns_to_extract_map.items():
+        actual_col_name = _find_actual_column_name(df_columns_list, primary_name, alt_names)
+        if actual_col_name and actual_col_name in trial_data_row:
+            value = trial_data_row[actual_col_name]
+            extracted_info[output_key] = None if pd.isna(value) else value
+
+    return extracted_info
+
 def filter_and_smooth_predictions(videodata, likelihood_threshold=LIKELIHOOD_THRESHOLD, window_length=5, polyorder=2):
     """
     Filters low-likelihood predictions and applies Savitzky-Golay smoothing per body part.
@@ -159,7 +261,6 @@ def filter_and_smooth_predictions(videodata, likelihood_threshold=LIKELIHOOD_THR
         result_df.loc[low_likelihood_mask, [x_col, y_col]] = np.nan
 
     return result_df
-# calculate various statistics and add them to the dataframe
 
 def trim_video_frames(dataframe):
     """
@@ -197,7 +298,6 @@ def fill_start_NaNs(df):
         df.loc[:valid_index, ["x", "y"]] = df.loc[:valid_index, ["x", "y"]].fillna({"x": first_x, "y": first_y})
     return df
 
-# --- Helper function for finding low likelihood frame gaps ---
 def _calculate_max_consecutive_nans(series: pd.Series) -> int:
     """Calculates the length of the longest consecutive run of NaNs in a Series."""
     if series.empty:
@@ -209,8 +309,16 @@ def _calculate_max_consecutive_nans(series: pd.Series) -> int:
     consecutive_nans_counts = is_na.groupby(group_ids).cumsum()
     return int(consecutive_nans_counts.max())
 
-# Helper function for finding gaps longer than MAX_INVALID_FRAMES
 def get_indices_of_long_nan_gaps(series: pd.Series, max_gap_length: int) -> pd.Index:
+    """
+    Helper function for finding gaps longer than MAX_INVALID_FRAMES
+    Args:
+        series: pandas series of video coordinates
+        max_gap_length: the allowed maximum gap length (int)
+
+    Returns: pd.Index
+
+    """
     is_nan = series.isna()
     if not is_nan.any():
         return pd.Index([])
@@ -718,6 +826,10 @@ if args["plot"]:
     print(f"Showed plots for Trial {trial_number}. Use UI to adjust and save!")
     exit()
 
+metadata_df = pd.DataFrame()
+if args["metadata"]:
+    metadata_df = load_metadata_spreadsheet(args["metadata"])
+
 # ITERATE THROUGH ALL .H5 FILES IN A DIRECTORY
 for dataset in os.listdir(data_directory):
     if dataset.endswith(".h5"):
@@ -739,9 +851,29 @@ for dataset in os.listdir(data_directory):
             finalDF = trim_video_frames(locustdata)
             if trial_number is not None:
                 trial_numbers.append(trial_number)
+            else:
+                print("Error: Trial Number Not Found!! Check your regex string and/or video names")
+                print("Aborting analysis")
+                exit()
         except ValueError as e:
             print(e)
             continue
+        # Grab metadata info if it exists
+        dict_to_merge = extract_metadata_for_trial(metadata_df, trial_number)
+
+        # Dynamically update stimulus side if the information is available
+        if dict_to_merge:
+            if "StimulusSide" in dict_to_merge.keys():
+                if dict_to_merge["StimulusSide"].lower() == "left":
+                    LEFT_STIMWALL_SIDE = True
+                elif dict_to_merge["StimulusSide"].lower() == "right":
+                    LEFT_STIMWALL_SIDE = False
+                else:
+                    print("ERROR: Unclear stimulus side: ", dict_to_merge["StimulusSide"])
+                    print("Aborting analysis")
+                    exit()
+
+
         #If debugging, use the non-trimmed video data so that the timestamps match the actual video
         if DEBUG:
             stats = calculate_stats(locustdata, trial_number)
@@ -751,7 +883,11 @@ for dataset in os.listdir(data_directory):
             print(f"Distance travelled CM: {stats['distance_travelled_cm']:.4f}")
         else:
             stats = calculate_stats(finalDF, trial_number)
+
+        # Reset stimulus side from potential dynamic update from metadata
+        LEFT_STIMWALL_SIDE = False if args["stimulus"] == "r" or args["stimulus"] =="right" else True
         stats["trial"] = trial_number
+        if dict_to_merge: stats.update(dict_to_merge)
         stats_df = pd.concat([stats_df, pd.DataFrame([stats])], ignore_index=True)
 
 
