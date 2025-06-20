@@ -59,7 +59,7 @@ python locust_tracker.py data_directory results_folder [options]
 - `-i, --likelihood`: Set low-likelihood threshold on a scale of 0 to 1 (default: `0.5`).
 - `-t, --trackstats`: Calculate and save information regarding tracking accuracy in the statistics.
 - `-md, --metadata`:  Path to an Excel or .csv spreadsheet containg metadata corresponding to the video trial numbers. Will dynamically update the stimulus side if a "Stimulus Side" column is provided.
-
+- `-c, --config`: Path to the config .JSON file containing arena parameters
 
 Use `-h` or `--help` for more information on the available parameters.
 
@@ -83,6 +83,14 @@ python locust_tracker.py ./data ./results -p Trial_01.h5
 This project is licensed under the GPL-3.0 License. See `LICENSE` for details.
 
 ## 📝 Patch Notes
+
+### Version 1.2.3
+
+**Config File Implementation**
+
+- Program can now read arena parameters containing pixel coordinates for boundaries and zones (IN BETA, requires testing)
+  - New Parameter: CONFIG_PATH (see -c under optional arugments)
+- Minor bug fixes, spelling fixes.
 
 ### Version 1.2.2
 

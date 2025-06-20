@@ -6,8 +6,30 @@ import warnings
 import re
 import argparse
 import seaborn as sns
+import json
+import sys
 
 warnings.filterwarnings('ignore')
+
+def load_config(config_path):
+    """Load configuration from JSON file"""
+    try:
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+        return config
+    except FileNotFoundError:
+        print(f"Warning: Config file '{config_path}' not found. Using default values.")
+        return {}
+    except json.JSONDecodeError as e:
+        print(f"Error: Invalid JSON in config file '{config_path}': {e}")
+        sys.exit(1)
+
+def get_default_config_path():
+    """Get the default config file path based on the script name"""
+    script_path = os.path.abspath(__file__)
+    script_dir = os.path.dirname(script_path)
+    script_name = os.path.splitext(os.path.basename(script_path))[0]
+    return os.path.join(script_dir, f"{script_name}.json")
 
 parser = argparse.ArgumentParser(description="Calculates various statistics in the movement, angle, and position categories for locust arena behavioral experiments."
                                              " Based off of tracking output from DeepLabCut.")
@@ -40,7 +62,7 @@ parser.add_argument("-l", "--length", "--videolength", type=int,
 # Advanced arguments (still optional)
 parser.add_argument("-p", "--plot", type=str,
                     help="Instead of analyzing the files, plot the movement for the specified trial file in the data_directory (just the file, do not specify the directory again) "
-                         " under 0.1 cm and -5 to 5 angles to help determine a good movement threshold. Plots will be display to the UI one at a time, to be edit and saved at the user's disgression")
+                         " under 0.1 cm and -5 to 5 angles to help determine a good movement threshold. Plots will be display to the UI one at a time, to be edited and saved at the user's disgression")
 parser.add_argument("-m", "--movethresh", type=float,
                     help="The threshold of movement in centimeters that is considered detected movement in the script. The default is 0.025 centimeters per frame, but may be adjusted here.",
                     default=0.025
@@ -65,7 +87,8 @@ parser.add_argument('-t', "--trackstats", action="store_true",
 parser.add_argument("-md", "--metadata", type=str,
                     help="A path to an excel or .csv spreadsheet containg metadata corresponding to the video trial numbers. If a `Stimulus Side` column is included, it will be used to dynamically adjust"
                          "the stimulus side used for related calculations. This will override the `-s` `--stimulus` parameter where necessary.")
-
+parser.add_argument("-c", "--config", type=str,
+                    help="Path to the configuration JSON file containing arena parameters. By default, looks for a config file with the same name as the script in the same directory.")
 
 
 
@@ -87,6 +110,10 @@ TRACKSTATS = args["trackstats"]
 METADATA_FILE_NAME = args["metadata"]
 MAX_INVALID_FRAMES = 6
 
+
+config_path = args["config"] if args["config"] else get_default_config_path()
+config = load_config(config_path)
+
 os.makedirs(results_folder, exist_ok=True)  # Create the folder if it doesn't exist
 
 
@@ -96,23 +123,27 @@ MAX_FRAMES = FRAMES_PER_SECOND * MAX_VIDEO_LENGTH_S
 FRONT_TRIM_BUFFER = 30
 FRONT_TRIM_BUFFER_FRAMES = FRAMES_PER_SECOND * FRONT_TRIM_BUFFER
 
-X_LIM = 1280
-Y_LIM = 1024
-LEFT_THIRD_BOUNDARY_X = 386 # the x-intercept for the left third of the cage (SUBJECT TO CHANGE)
-RIGHT_THIRD_BOUNDARY_X = 755 # the x-intercept for the right third of the cage (SUBJECT TO CHANGE)
-LEFT_STIMWALL_BOUNDARY_X = 97 # x-intercept coordinate for the left stimulus wall (intersecting with the floor)
-RIGHT_STIMWALL_BOUNDARY_X = 1050 # x-intercept coordinate for the left stimulus wall (intersecting with the floor)
-TOP_WALL_BOUNDARY_Y = Y_LIM - 110 # y-intercept coordinate for the top wall (intersecting with the floor)
-BOTTOM_WALL_BOUNDARY_Y = Y_LIM - 890 # y-intercept coordinate for the bottom wall (intersecting with the floor)
-TOP_THIRD_BOUNDARY_Y = Y_LIM - 347
-BOTTOM_THIRD_BOUNDARY_Y = Y_LIM - 644
-HALFLINE_X = 589
-HALFLINE_Y = 496
-BOUNDARY_BUFFER = 10 # pixel buffer to boundary for "on floor of the arena" calculations for animals
+X_LIM = config.get('X_LIM', 1280)
+Y_LIM = config.get('Y_LIM', 1024)
+LEFT_THIRD_BOUNDARY_X = config.get('LEFT_THIRD_BOUNDARY_X', 386)
+RIGHT_THIRD_BOUNDARY_X = config.get('RIGHT_THIRD_BOUNDARY_X', 755)
+LEFT_STIMWALL_BOUNDARY_X = config.get('LEFT_STIMWALL_BOUNDARY_X', 97)
+RIGHT_STIMWALL_BOUNDARY_X = config.get('RIGHT_STIMWALL_BOUNDARY_X', 1050)
 
-#PIXELS_TO_MM calculations
-ARENA_DIMENSION_CM_X = 35
-ARENA_DIMENSION_CM_Y = 30
+# For Y coordinates that depend on Y_LIM, calculate them after Y_LIM is loaded
+TOP_WALL_BOUNDARY_Y = config.get('TOP_WALL_BOUNDARY_Y', Y_LIM - 110)
+BOTTOM_WALL_BOUNDARY_Y = config.get('BOTTOM_WALL_BOUNDARY_Y', Y_LIM - 890)
+TOP_THIRD_BOUNDARY_Y = config.get('TOP_THIRD_BOUNDARY_Y', Y_LIM - 347)
+BOTTOM_THIRD_BOUNDARY_Y = config.get('BOTTOM_THIRD_BOUNDARY_Y', Y_LIM - 644)
+
+HALFLINE_X = config.get('HALFLINE_X', 589)
+HALFLINE_Y = config.get('HALFLINE_Y', 496)
+BOUNDARY_BUFFER = config.get('BOUNDARY_BUFFER', 10)
+
+# PIXELS_TO_MM calculations
+ARENA_DIMENSION_CM_X = config.get('ARENA_DIMENSION_CM_X', 35)
+ARENA_DIMENSION_CM_Y = config.get('ARENA_DIMENSION_CM_Y', 30)
+
 X_PIXEL_RATIO = ARENA_DIMENSION_CM_X / abs(RIGHT_STIMWALL_BOUNDARY_X - LEFT_STIMWALL_BOUNDARY_X)
 Y_PIXEL_RATIO =  ARENA_DIMENSION_CM_Y / abs(TOP_WALL_BOUNDARY_Y - BOTTOM_WALL_BOUNDARY_Y)
 pd.options.display.float_format = '{:.2f}'.format
@@ -120,6 +151,7 @@ pd.options.display.float_format = '{:.2f}'.format
 #MOVEMENT_THRESHOLD = 1.5 #How many pixels of movement per frame should be counted as movement from the animal
 #ANGLE_THRESHOLD = 1 # How many degrees of movement is valid detected movement
 #MOVEMENT_THRESHOLD_CM = 0.025
+
 
 def validate_dlc_dataframe(df, expected_bodyparts):
     """
@@ -219,10 +251,10 @@ def extract_metadata_for_trial(metadata_df: pd.DataFrame, trial_number_to_find):
     trial_data_row = matching_rows.iloc[0]
 
     columns_to_extract_map = {
-        "Species": ("Species", []),
-        "Sex": ("Sex", []),
-        "Treatment": ("Treatment", ["treat"]),
-        "StimulusSide": ("StimulusSide", ["Stimulus Side","stim_side"])
+        "species": ("Species", []),
+        "sex": ("Sex", []),
+        "treatment": ("Treatment", ["treat"]),
+        "stim_side": ("StimulusSide", ["Stimulus Side","stim_side"])
     }
 
     for output_key, (primary_name, alt_names) in columns_to_extract_map.items():
@@ -346,7 +378,7 @@ def get_gaze_direction(df):
         "rightwall_gaze_f": 0,
         "other_gaze_f": 0,
         "onwalls_f": 0,
-        "uknown_gaze_f": 0
+        "unknown_gaze_f": 0
     }
     dotprods = []
     # TODO: See how often head is used instead of eyes
@@ -397,7 +429,7 @@ def get_gaze_direction(df):
         useEyes = False
         useBodyvec = True
         if np.isnan(c_x):
-            gaze_data_total["uknown_gaze_f"] += 1
+            gaze_data_total["unknown_gaze_f"] += 1
             continue
         elif np.isnan(h_x):
             useBodyvec = False
@@ -468,7 +500,7 @@ def get_gaze_direction(df):
         else:
             gaze_data_total["onwalls_f"] +=1
 
-    on_arena_floor = (FRAMES_EXPECTED - gaze_data_total["onwalls_f"] - gaze_data_total["uknown_gaze_f"])
+    on_arena_floor = (FRAMES_EXPECTED - gaze_data_total["onwalls_f"] - gaze_data_total["unknown_gaze_f"])
 
     if DEBUG:
         plt.figure(figsize=(8, 5))
@@ -744,7 +776,7 @@ def calculate_stats(df, trial_num):
     if not TRACKSTATS:
         ultimate_stats_dict.pop("largest_nan_gap_center")
         ultimate_stats_dict.pop("largest_nan_gap_head")
-        ultimate_stats_dict.pop("unassigned_lcr_zone_frames")
+        ultimate_stats_dict.pop("unassigned_lcr_zone_seconds")
         ultimate_stats_dict.pop("average_head_tracking_accuracy")
         ultimate_stats_dict.pop("average_center_tracking_accuracy")
     return ultimate_stats_dict
