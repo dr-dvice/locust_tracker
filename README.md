@@ -90,6 +90,8 @@ This project is licensed under the GPL-3.0 License. See `LICENSE` for details.
 
 - Bug Fixes to new Config File Version
 - Fixed bug causing config file coordinates to not be converted correctly into cartesian coords
+- Added .JSON config files for different arena setups
+- Gaze stats now shown in seconds rather than frames
 
 ### Version 1.2.3
 
