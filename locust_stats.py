@@ -131,10 +131,16 @@ LEFT_STIMWALL_BOUNDARY_X = config.get('LEFT_STIMWALL_BOUNDARY_X', 97)
 RIGHT_STIMWALL_BOUNDARY_X = config.get('RIGHT_STIMWALL_BOUNDARY_X', 1050)
 
 # For Y coordinates that depend on Y_LIM, calculate them after Y_LIM is loaded
-TOP_WALL_BOUNDARY_Y = config.get('TOP_WALL_BOUNDARY_Y', Y_LIM - 110)
-BOTTOM_WALL_BOUNDARY_Y = config.get('BOTTOM_WALL_BOUNDARY_Y', Y_LIM - 890)
-TOP_THIRD_BOUNDARY_Y = config.get('TOP_THIRD_BOUNDARY_Y', Y_LIM - 347)
-BOTTOM_THIRD_BOUNDARY_Y = config.get('BOTTOM_THIRD_BOUNDARY_Y', Y_LIM - 644)
+TOP_WALL_BOUNDARY_Y = config.get('TOP_WALL_BOUNDARY_Y', 110)
+BOTTOM_WALL_BOUNDARY_Y = config.get('BOTTOM_WALL_BOUNDARY_Y', 890)
+TOP_THIRD_BOUNDARY_Y = config.get('TOP_THIRD_BOUNDARY_Y', 347)
+BOTTOM_THIRD_BOUNDARY_Y = config.get('BOTTOM_THIRD_BOUNDARY_Y', 644)
+
+# Convert ALL Y coordinates from pixel x,y format to traditional cartesian x,y format
+TOP_WALL_BOUNDARY_Y = Y_LIM - TOP_WALL_BOUNDARY_Y
+BOTTOM_WALL_BOUNDARY_Y = Y_LIM - BOTTOM_WALL_BOUNDARY_Y
+TOP_THIRD_BOUNDARY_Y = Y_LIM - TOP_THIRD_BOUNDARY_Y
+BOTTOM_THIRD_BOUNDARY_Y = Y_LIM - BOTTOM_THIRD_BOUNDARY_Y
 
 HALFLINE_X = config.get('HALFLINE_X', 589)
 HALFLINE_Y = config.get('HALFLINE_Y', 496)
@@ -151,7 +157,6 @@ pd.options.display.float_format = '{:.2f}'.format
 #MOVEMENT_THRESHOLD = 1.5 #How many pixels of movement per frame should be counted as movement from the animal
 #ANGLE_THRESHOLD = 1 # How many degrees of movement is valid detected movement
 #MOVEMENT_THRESHOLD_CM = 0.025
-
 
 def validate_dlc_dataframe(df, expected_bodyparts):
     """
@@ -386,32 +391,28 @@ def get_gaze_direction(df):
     #usedhead = 0
 
     def check_arenavector_bounds(vector_to_check, arena_bound_vectors, gaze_data):
-        if in_boundaries:
-            dotprod = np.dot(eye_vector, body_vector)
-            # In most situations on the arena floor, the eye vector should be perfectly perpendicular to the body vector
-            if DEBUG:
-                angle_error = 90 - abs(round(np.degrees(np.arccos(np.clip(dotprod, -1.0, 1.0))), 2))
-                if angle_error > 15:
-                    print(
-                        f"Bad eye vs. body orientation vectors at min {int(idx / FRAMES_PER_SECOND // 60)}:{int(idx / FRAMES_PER_SECOND % 60)}. Angle deviation of {angle_error:.2f}°")
-            dotprods.append(dotprod)
-            if vector_to_check[0] > 0:  # Positive gaze vector for x cartesian coordinate, animal is looking right
-                # Now check if y value of normalized vector is between the right stimwall bounds
-                if arena_bound_vectors["right_wall_vector_top"][1] >= vector_to_check[1] >= arena_bound_vectors["right_wall_vector_bottom"][1]:
-                    gaze_data["rightwall_gaze_f"] += 1
-                else:
-                    gaze_data["other_gaze_f"] += 1
-            elif vector_to_check[0] < 0:  # Negative gaze vector for x cartesian coordinate, animal is looking left
-                # Is it within left stimall wbounds?
-                if arena_bound_vectors["left_wall_vector_top"][1] >= vector_to_check[1] >= arena_bound_vectors["left_wall_vector_bottom"][1]:
-                    gaze_data["leftwall_gaze_f"] += 1
-                else:
-                    gaze_data["other_gaze_f"] += 1
+        dotprod = np.dot(eye_vector, body_vector)
+        # In most situations on the arena floor, the eye vector should be perfectly perpendicular to the body vector
+        if DEBUG:
+            angle_error = 90 - abs(round(np.degrees(np.arccos(np.clip(dotprod, -1.0, 1.0))), 2))
+            if angle_error > 15:
+                print(
+                    f"Bad eye vs. body orientation vectors at min {int(idx / FRAMES_PER_SECOND // 60)}:{int(idx / FRAMES_PER_SECOND % 60)}. Angle deviation of {angle_error:.2f}°")
+        dotprods.append(dotprod)
+        if vector_to_check[0] > 0:  # Positive gaze vector for x cartesian coordinate, animal is looking right
+            # Now check if y value of normalized vector is between the right stimwall bounds
+            if arena_bound_vectors["right_wall_vector_top"][1] >= vector_to_check[1] >= arena_bound_vectors["right_wall_vector_bottom"][1]:
+                gaze_data["rightwall_gaze_f"] += 1
+            else:
+                gaze_data["other_gaze_f"] += 1
+        elif vector_to_check[0] < 0:  # Negative gaze vector for x cartesian coordinate, animal is looking left
+            # Is it within left stimall wbounds?
+            if arena_bound_vectors["left_wall_vector_top"][1] >= vector_to_check[1] >= arena_bound_vectors["left_wall_vector_bottom"][1]:
+                gaze_data["leftwall_gaze_f"] += 1
             else:
                 gaze_data["other_gaze_f"] += 1
         else:
-            gaze_data["onwalls_f"] += 1
-
+            gaze_data["other_gaze_f"] += 1
         return gaze_data
 
     for idx, row in df.iterrows():
@@ -474,7 +475,7 @@ def get_gaze_direction(df):
         arena_boundary_vectors = {
             "left_wall_vector_top": left_wall_vector_top,
             "left_wall_vector_bottom": left_wall_vector_bottom,
-            "right_wall_vector_top": left_wall_vector_top,
+            "right_wall_vector_top": right_wall_vector_top,
             "right_wall_vector_bottom": right_wall_vector_bottom
         }
 
@@ -513,9 +514,10 @@ def get_gaze_direction(df):
         plt.show()
 
     gaze_data_total["on_arena_floor_f"] = on_arena_floor
+    # Create and return a dictionary counting by seconds rather than frames
+    gaze_data_output = {k.replace('_f', '_s'): v / FRAMES_PER_SECOND for k, v in gaze_data_total.items()}
 
-    # TODO: FIGURE OUT IF YOU WANT TO COUNT FRAMES OR PERCENTAGE TIME SPENT LOOKING AT WALL OR WHATEVER ELSE
-    return gaze_data_total
+    return gaze_data_output
 
 def calculate_stats(df, trial_num):
     """

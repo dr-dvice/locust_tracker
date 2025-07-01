@@ -84,6 +84,13 @@ This project is licensed under the GPL-3.0 License. See `LICENSE` for details.
 
 ## 📝 Patch Notes
 
+### Version 1.2.4
+
+**Config File Version Fixes**
+
+- Bug Fixes to new Config File Version
+- Fixed bug causing config file coordinates to not be converted correctly into cartesian coords
+
 ### Version 1.2.3
 
 **Config File Implementation**
